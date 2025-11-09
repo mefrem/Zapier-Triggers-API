@@ -5,6 +5,7 @@ Autonomous software development using Claude Code. No humans in the loop.
 ## What This Does
 
 Automates the **Scrum Master -> Dev -> QA** cycle until your entire epic is complete. Claude continuously:
+
 1. Drafts stories (SM agent)
 2. Implements code (Dev agent)
 3. Reviews implementation (QA agent)
@@ -13,13 +14,19 @@ Automates the **Scrum Master -> Dev -> QA** cycle until your entire epic is comp
 
 **You only get interrupted when the entire epic is finished or there's a critical blocker.**
 
-## Files
+## What's Included
+
+This repository contains:
+
+- **BMAD v4** - Complete framework in `.bmad-core/`
+- **Pre-configured agents** - SM, Dev, and QA agents ready to use in `.claude/agents/`
+- **Orchestrator prompts** - Sequential and parallelized workflow templates
 
 ```
 orchestrator.md                   # Sequential: one epic, one story at a time
 orchestrator-parallelized.md      # Parallel: multiple epics/stories simultaneously
-.claude/agents/                   # SM, Dev, QA agent configs
-.bmad-core/                       # Full BMAD framework
+.claude/agents/                   # SM, Dev, QA agent configs (pre-loaded)
+.bmad-core/                       # Full BMAD v4 framework
 ```
 
 ## Quick Start
@@ -27,17 +34,29 @@ orchestrator-parallelized.md      # Parallel: multiple epics/stories simultaneou
 ### 1. Choose Your Mode
 
 **Sequential** - Linear, one epic:
+
 - Copy `orchestrator.md`
 - Paste into Claude Code
 - Watch it cycle through stories until epic complete
 
 **Parallelized** - Multiple epics, max throughput:
+
 - Requires `docs/parallelization-analysis.md` in your project
 - Copy `orchestrator-parallelized.md`
 - Paste into Claude Code
 - Watch it work multiple stories across workstreams simultaneously
 
-### 2. Your Project Needs
+### 2. Run With Full Autonomy
+
+To allow Claude to operate without permission prompts:
+
+```bash
+claude --dangerously-skip-permissions
+```
+
+**Important**: This skips approval gates. Only use this when you trust the orchestrator to run autonomously.
+
+### 3. Your Project Needs
 
 ```
 your-project/
@@ -105,11 +124,13 @@ Reads `parallelization-analysis.md` to know dependencies. Sequences dependent wo
 ## When Does It Stop?
 
 **Auto-continues through**:
+
 - QA feedback cycles
 - Story completions
 - Normal development work
 
 **Only interrupts you for**:
+
 - Epic(s) complete (all stories "Done")
 - Critical blocker (missing docs, conflicting requirements)
 - Agent failure (can't update status after 2 tries)
