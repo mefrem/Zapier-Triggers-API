@@ -1,0 +1,115 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to Production Environment
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Run Tests
+        working-directory: ./services/api
+        run: |
+          poetry install
+          poetry run pytest --cov=src
+
+      - name: Terraform Init
+        working-directory: ./infrastructure/terraform/environments/production
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: ./infrastructure/terraform/environments/production
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: ./infrastructure/terraform/environments/production
+        run: terraform apply -auto-approve tfplan
+
+      - name: Get API Gateway URL
+        working-directory: ./infrastructure/terraform/environments/production
+        id: api_url
+        run: |
+          API_URL=$(terraform output -raw api_gateway_url)
+          echo "api_url=$API_URL" >> $GITHUB_OUTPUT
+
+      - name: Health Check
+        run: |
+          sleep 60  # Wait for deployment to stabilize
+          HEALTH_URL="${{ steps.api_url.outputs.api_url }}/health"
+          echo "Checking health endpoint: $HEALTH_URL"
+
+          MAX_RETRIES=5
+          RETRY_COUNT=0
+
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL")
+
+            if [ "$RESPONSE" -eq 200 ]; then
+              echo "Health check passed!"
+              exit 0
+            fi
+
+            echo "Health check attempt $((RETRY_COUNT + 1)) failed with status code: $RESPONSE"
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            sleep 10
+          done
+
+          echo "Health check failed after $MAX_RETRIES attempts"
+          exit 1
+
+      - name: Smoke Tests
+        run: |
+          HEALTH_URL="${{ steps.api_url.outputs.api_url }}/health"
+
+          # Test response format
+          RESPONSE=$(curl -s "$HEALTH_URL")
+          echo "Health response: $RESPONSE"
+
+          # Check for required fields
+          if echo "$RESPONSE" | grep -q "status"; then
+            echo "Response format check passed"
+          else
+            echo "Response format check failed"
+            exit 1
+          fi
+
+      - name: Notify Deployment Status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "Production deployment successful!"
+            echo "API URL: ${{ steps.api_url.outputs.api_url }}"
+          else
+            echo "Production deployment failed!"
+            exit 1
+          fi

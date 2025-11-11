@@ -1,0 +1,5 @@
+# Lambda Layer Requirements
+# These dependencies will be packaged into a Lambda layer
+
+boto3==1.34.20
+botocore==1.34.20

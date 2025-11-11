@@ -1,0 +1,72 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy to Staging Environment
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.0
+
+      - name: Terraform Init
+        working-directory: ./infrastructure/terraform/environments/staging
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: ./infrastructure/terraform/environments/staging
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: ./infrastructure/terraform/environments/staging
+        run: terraform apply -auto-approve tfplan
+
+      - name: Get API Gateway URL
+        working-directory: ./infrastructure/terraform/environments/staging
+        id: api_url
+        run: |
+          API_URL=$(terraform output -raw api_gateway_url)
+          echo "api_url=$API_URL" >> $GITHUB_OUTPUT
+
+      - name: Health Check
+        run: |
+          sleep 30  # Wait for deployment to stabilize
+          HEALTH_URL="${{ steps.api_url.outputs.api_url }}/health"
+          echo "Checking health endpoint: $HEALTH_URL"
+
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL")
+
+          if [ "$RESPONSE" -eq 200 ]; then
+            echo "Health check passed!"
+          else
+            echo "Health check failed with status code: $RESPONSE"
+            exit 1
+          fi
+
+      - name: Notify Deployment Status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "Staging deployment successful!"
+          else
+            echo "Staging deployment failed!"
+            exit 1
+          fi
