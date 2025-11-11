@@ -18,8 +18,13 @@ from botocore.exceptions import ClientError
 from aws_lambda_powertools import Logger, Tracer, Metrics
 from aws_lambda_powertools.metrics import MetricUnit
 
-from models.event import EventInput, EventResponse, ErrorResponse, ErrorInfo, ErrorDetail
+from models.event import (
+    EventInput, EventResponse, EventAckResponse, EventStatusResponse,
+    ErrorResponse, ErrorInfo, ErrorDetail
+)
 from services.event_service import EventService
+from services.event_lifecycle_service import EventLifecycleService
+from services.retry_service import RetryService
 
 # Initialize AWS Lambda Powertools
 logger = Logger(service="event_ingestion")
@@ -36,8 +41,10 @@ app = FastAPI(
     openapi_url="/openapi.json"
 )
 
-# Initialize EventService (singleton pattern)
+# Initialize services (singleton pattern)
 event_service = EventService()
+lifecycle_service = EventLifecycleService()
+retry_service = RetryService()
 
 
 @app.exception_handler(RequestValidationError)
@@ -261,6 +268,384 @@ async def create_event(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create event"
+        )
+
+
+@app.delete(
+    "/events/{event_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        204: {
+            "description": "Event successfully deleted (no content)"
+        },
+        401: {
+            "description": "Unauthorized - invalid API key",
+            "model": ErrorResponse
+        },
+        404: {
+            "description": "Event not found",
+            "model": ErrorResponse
+        },
+        500: {
+            "description": "Internal server error",
+            "model": ErrorResponse
+        }
+    },
+    summary="Delete an event",
+    description="Permanently delete an event. Requires user ownership verification."
+)
+@tracer.capture_method
+@metrics.log_metrics
+async def delete_event(
+    event_id: str,
+    request: Request
+):
+    """
+    Delete an event permanently.
+
+    Args:
+        event_id: Event UUID to delete
+        request: FastAPI request object
+
+    Returns:
+        204 No Content on success
+
+    Raises:
+        HTTPException: 404 if event not found, 401 if unauthorized, 500 on error
+    """
+    correlation_id = request.headers.get('X-Request-ID', str(uuid.uuid4()))
+    user_id = getattr(request.state, 'user_id', 'anonymous')
+
+    logger.info(
+        "Processing event deletion request",
+        extra={
+            "correlation_id": correlation_id,
+            "user_id": user_id,
+            "event_id": event_id
+        }
+    )
+
+    try:
+        # Delete event via lifecycle service
+        deleted = lifecycle_service.delete_event(user_id, event_id)
+
+        if not deleted:
+            # Event not found or not owned by user
+            logger.warning(
+                "Event not found for deletion",
+                extra={
+                    "correlation_id": correlation_id,
+                    "user_id": user_id,
+                    "event_id": event_id
+                }
+            )
+
+            metrics.add_metric(name="EventNotFound", unit=MetricUnit.Count, value=1)
+
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Event not found"
+            )
+
+        # Success - log audit trail
+        logger.info(
+            "Event deleted successfully",
+            extra={
+                "correlation_id": correlation_id,
+                "user_id": user_id,
+                "event_id": event_id,
+                "operation": "event_deleted"
+            }
+        )
+
+        metrics.add_metric(name="EventsDeleted", unit=MetricUnit.Count, value=1)
+
+        # Return 204 No Content (no response body)
+        return JSONResponse(
+            status_code=status.HTTP_204_NO_CONTENT,
+            content=None
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(
+            "Failed to delete event",
+            extra={
+                "correlation_id": correlation_id,
+                "user_id": user_id,
+                "event_id": event_id,
+                "error": str(e)
+            }
+        )
+
+        metrics.add_metric(name="EventDeletionErrors", unit=MetricUnit.Count, value=1)
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete event"
+        )
+
+
+@app.post(
+    "/events/{event_id}/ack",
+    response_model=EventAckResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Event successfully acknowledged",
+            "model": EventAckResponse
+        },
+        401: {
+            "description": "Unauthorized - invalid API key",
+            "model": ErrorResponse
+        },
+        404: {
+            "description": "Event not found",
+            "model": ErrorResponse
+        },
+        500: {
+            "description": "Internal server error",
+            "model": ErrorResponse
+        }
+    },
+    summary="Acknowledge an event",
+    description="Mark an event as delivered. Operation is idempotent."
+)
+@tracer.capture_method
+@metrics.log_metrics
+async def acknowledge_event(
+    event_id: str,
+    request: Request
+) -> EventAckResponse:
+    """
+    Acknowledge an event (mark as delivered).
+
+    Args:
+        event_id: Event UUID to acknowledge
+        request: FastAPI request object
+
+    Returns:
+        EventAckResponse with updated event including status='delivered'
+
+    Raises:
+        HTTPException: 404 if event not found, 401 if unauthorized, 500 on error
+    """
+    correlation_id = request.headers.get('X-Request-ID', str(uuid.uuid4()))
+    user_id = getattr(request.state, 'user_id', 'anonymous')
+
+    logger.info(
+        "Processing event acknowledgment request",
+        extra={
+            "correlation_id": correlation_id,
+            "user_id": user_id,
+            "event_id": event_id
+        }
+    )
+
+    try:
+        # Acknowledge event via lifecycle service
+        updated_event = lifecycle_service.acknowledge_event(user_id, event_id)
+
+        if not updated_event:
+            # Event not found or not owned by user
+            logger.warning(
+                "Event not found for acknowledgment",
+                extra={
+                    "correlation_id": correlation_id,
+                    "user_id": user_id,
+                    "event_id": event_id
+                }
+            )
+
+            metrics.add_metric(name="EventNotFound", unit=MetricUnit.Count, value=1)
+
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Event not found"
+            )
+
+        # Success - log audit trail
+        logger.info(
+            "Event acknowledged successfully",
+            extra={
+                "correlation_id": correlation_id,
+                "user_id": user_id,
+                "event_id": event_id,
+                "operation": "event_acknowledged"
+            }
+        )
+
+        metrics.add_metric(name="EventsAcknowledged", unit=MetricUnit.Count, value=1)
+
+        # Return updated event
+        return EventAckResponse(
+            event_id=updated_event['event_id'],
+            event_type=updated_event['event_type'],
+            timestamp=updated_event['timestamp'],
+            payload=updated_event['payload'],
+            status=updated_event['status'],
+            delivered_at=updated_event['delivered_at']
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(
+            "Failed to acknowledge event",
+            extra={
+                "correlation_id": correlation_id,
+                "user_id": user_id,
+                "event_id": event_id,
+                "error": str(e)
+            }
+        )
+
+        metrics.add_metric(name="EventAcknowledgmentErrors", unit=MetricUnit.Count, value=1)
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to acknowledge event"
+        )
+
+
+@app.get(
+    "/events/{event_id}/status",
+    response_model=EventStatusResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Event status retrieved successfully",
+            "model": EventStatusResponse
+        },
+        401: {
+            "description": "Unauthorized - invalid API key",
+            "model": ErrorResponse
+        },
+        404: {
+            "description": "Event not found",
+            "model": ErrorResponse
+        },
+        500: {
+            "description": "Internal server error",
+            "model": ErrorResponse
+        }
+    },
+    summary="Get event status",
+    description="Retrieve event delivery status and retry metadata"
+)
+@tracer.capture_method
+@metrics.log_metrics
+async def get_event_status(
+    event_id: str,
+    request: Request
+) -> EventStatusResponse:
+    """
+    Get event status metadata.
+
+    Args:
+        event_id: Event UUID
+        request: FastAPI request object
+
+    Returns:
+        EventStatusResponse with status metadata
+
+    Raises:
+        HTTPException: 404 if event not found, 401 if unauthorized, 500 on error
+    """
+    correlation_id = request.headers.get('X-Request-ID', str(uuid.uuid4()))
+    user_id = getattr(request.state, 'user_id', 'anonymous')
+
+    logger.info(
+        "Processing event status request",
+        extra={
+            "correlation_id": correlation_id,
+            "user_id": user_id,
+            "event_id": event_id
+        }
+    )
+
+    try:
+        # Get event status via retry service
+        status_info = retry_service.get_event_status(user_id, event_id)
+
+        if not status_info:
+            # Event not found or not owned by user
+            logger.warning(
+                "Event not found for status query",
+                extra={
+                    "correlation_id": correlation_id,
+                    "user_id": user_id,
+                    "event_id": event_id
+                }
+            )
+
+            metrics.add_metric(name="EventNotFound", unit=MetricUnit.Count, value=1)
+
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Event not found"
+            )
+
+        # Calculate next_retry_at if event is queued for retry
+        next_retry_at = None
+        if status_info.get('status') == 'queued' and status_info.get('retry_attempts', 0) < 3:
+            retry_attempts = status_info.get('retry_attempts', 0)
+            next_delay = retry_service.get_retry_delay(retry_attempts)
+            if next_delay and status_info.get('last_retry_at'):
+                # Parse last_retry_at and add delay
+                from datetime import datetime, timedelta
+                try:
+                    last_retry = datetime.fromisoformat(status_info['last_retry_at'].replace('Z', '+00:00'))
+                    next_retry = last_retry + timedelta(seconds=next_delay)
+                    next_retry_at = next_retry.isoformat().replace('+00:00', 'Z')
+                except (ValueError, TypeError):
+                    pass  # If parsing fails, leave next_retry_at as None
+
+        logger.info(
+            "Event status retrieved successfully",
+            extra={
+                "correlation_id": correlation_id,
+                "user_id": user_id,
+                "event_id": event_id,
+                "status": status_info.get('status')
+            }
+        )
+
+        metrics.add_metric(name="EventStatusQueries", unit=MetricUnit.Count, value=1)
+
+        # Return status response
+        return EventStatusResponse(
+            event_id=status_info['event_id'],
+            status=status_info['status'],
+            retry_attempts=status_info.get('retry_attempts', 0),
+            last_retry_at=status_info.get('last_retry_at'),
+            failed_at=status_info.get('failed_at'),
+            delivered_at=status_info.get('delivered_at'),
+            next_retry_at=next_retry_at
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(
+            "Failed to get event status",
+            extra={
+                "correlation_id": correlation_id,
+                "user_id": user_id,
+                "event_id": event_id,
+                "error": str(e)
+            }
+        )
+
+        metrics.add_metric(name="EventStatusQueryErrors", unit=MetricUnit.Count, value=1)
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get event status"
         )
 
 

@@ -162,3 +162,82 @@ class ErrorResponse(BaseModel):
     )
 
     error: ErrorInfo = Field(..., description="Error information")
+
+
+class EventAckResponse(BaseModel):
+    """
+    Response model for POST /events/{event_id}/ack (200 OK).
+
+    Returns the full event object with updated status='delivered'.
+
+    Attributes:
+        event_id: Unique event identifier
+        event_type: Event type identifier
+        timestamp: ISO 8601 timestamp when event was created
+        payload: Event payload data
+        status: Event status (should be 'delivered')
+        delivered_at: ISO 8601 timestamp when event was acknowledged
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "event_id": "550e8400-e29b-41d4-a716-446655440000",
+                "event_type": "user.created",
+                "timestamp": "2025-11-11T09:00:00.123456Z",
+                "payload": {
+                    "user_id": "usr_12345",
+                    "email": "newuser@example.com",
+                    "name": "Jane Doe"
+                },
+                "status": "delivered",
+                "delivered_at": "2025-11-11T10:00:00.123456Z"
+            }
+        }
+    )
+
+    event_id: str = Field(..., description="Unique event identifier (UUID v4)")
+    event_type: str = Field(..., description="Event type identifier")
+    timestamp: str = Field(..., description="ISO 8601 timestamp (UTC) when event was created")
+    payload: Dict[str, Any] = Field(..., description="Event payload data")
+    status: str = Field(..., description="Event status (should be 'delivered')")
+    delivered_at: str = Field(..., description="ISO 8601 timestamp (UTC) when event was acknowledged")
+
+
+class EventStatusResponse(BaseModel):
+    """
+    Response model for GET /events/{event_id}/status (200 OK).
+
+    Returns status metadata without full event payload.
+
+    Attributes:
+        event_id: Unique event identifier
+        status: Event status (received/queued/delivered/failed)
+        retry_attempts: Number of retry attempts (0-3)
+        last_retry_at: ISO 8601 timestamp of last retry, or None
+        failed_at: ISO 8601 timestamp when marked as failed, or None
+        delivered_at: ISO 8601 timestamp when delivered, or None
+        next_retry_at: Calculated next retry timestamp (optional)
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "event_id": "550e8400-e29b-41d4-a716-446655440000",
+                "status": "queued",
+                "retry_attempts": 1,
+                "last_retry_at": "2025-11-11T10:00:00.123456Z",
+                "failed_at": None,
+                "delivered_at": None,
+                "next_retry_at": "2025-11-11T10:05:00.123456Z"
+            }
+        }
+    )
+
+    event_id: str = Field(..., description="Unique event identifier (UUID v4)")
+    status: str = Field(..., description="Event status: received, queued, delivered, or failed")
+    retry_attempts: int = Field(default=0, description="Number of retry attempts (0-3)")
+    last_retry_at: Optional[str] = Field(default=None, description="ISO 8601 timestamp of last retry")
+    failed_at: Optional[str] = Field(default=None, description="ISO 8601 timestamp when failed")
+    delivered_at: Optional[str] = Field(default=None, description="ISO 8601 timestamp when delivered")
+    next_retry_at: Optional[str] = Field(default=None, description="Calculated next retry timestamp")

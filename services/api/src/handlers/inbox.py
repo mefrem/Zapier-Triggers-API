@@ -139,13 +139,19 @@ async def general_exception_handler(request: Request, exc: Exception):
             "model": ErrorResponse
         }
     },
-    summary="Retrieve undelivered events",
-    description="Get list of undelivered events from inbox with pagination and optional filtering by event type."
+    summary="Retrieve events by status",
+    description="Get list of events from inbox with pagination and optional filtering by event type and status. "
+                "Default status is 'received' (undelivered events). Use status='failed' to query permanently failed events."
 )
 @tracer.capture_method
 @metrics.log_metrics(capture_cold_start_metric=True)
 async def get_inbox(
     request: Request,
+    status_filter: str = Query(
+        default="received",
+        alias="status",
+        description="Filter by event status: 'received' (default) or 'failed'"
+    ),
     limit: int = Query(
         default=50,
         ge=1,
@@ -162,10 +168,11 @@ async def get_inbox(
     )
 ) -> InboxResponse:
     """
-    Retrieve undelivered events from inbox.
+    Retrieve events from inbox by status.
 
     Args:
         request: FastAPI request object
+        status_filter: Event status to filter ('received' or 'failed', default: 'received')
         limit: Number of events to return (1-100, default: 50)
         cursor: Pagination cursor for next page
         event_type: Optional event type filter(s)
@@ -223,6 +230,7 @@ async def get_inbox(
         extra={
             "correlation_id": correlation_id,
             "user_id": user_id,
+            "status": status_filter,
             "limit": limit,
             "has_cursor": cursor is not None,
             "event_types": event_type
@@ -230,6 +238,14 @@ async def get_inbox(
     )
 
     try:
+        # Validate status parameter
+        valid_statuses = ['received', 'failed']
+        if status_filter not in valid_statuses:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status parameter. Must be one of: {', '.join(valid_statuses)}"
+            )
+
         # Validate event_type if provided (filter empty strings)
         event_types_filtered = None
         if event_type:
@@ -240,12 +256,13 @@ async def get_inbox(
                     detail="event_type must contain at least one non-empty value"
                 )
 
-        # Retrieve events from inbox service
+        # Retrieve events from inbox service with status filter
         response = inbox_service.get_inbox_events(
             user_id=user_id,
             limit=limit,
             cursor=cursor,
-            event_types=event_types_filtered
+            event_types=event_types_filtered,
+            status=status_filter
         )
 
         # Calculate duration

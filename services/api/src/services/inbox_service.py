@@ -36,16 +36,18 @@ class InboxService:
         user_id: str,
         limit: int = 50,
         cursor: Optional[str] = None,
-        event_types: Optional[List[str]] = None
+        event_types: Optional[List[str]] = None,
+        status: str = 'received'
     ) -> InboxResponse:
         """
-        Retrieve undelivered events for a user.
+        Retrieve events for a user filtered by status.
 
         Args:
             user_id: User identifier
             limit: Maximum number of events to return (1-100)
             cursor: Pagination cursor from previous request
             event_types: Optional list of event types to filter
+            status: Event status to filter ('received' or 'failed', default: 'received')
 
         Returns:
             InboxResponse with events and pagination metadata
@@ -57,6 +59,11 @@ class InboxService:
             # Validate limit
             if limit < 1 or limit > 100:
                 raise ValueError("limit must be between 1 and 100")
+
+            # Validate status
+            valid_statuses = ['received', 'failed', 'queued', 'delivered']
+            if status not in valid_statuses:
+                raise ValueError(f"status must be one of: {', '.join(valid_statuses)}")
 
             # Parse cursor if provided
             cursor_timestamp = None
@@ -87,6 +94,7 @@ class InboxService:
                 "Querying inbox events",
                 extra={
                     "user_id": user_id,
+                    "status": status,
                     "limit": limit,
                     "has_cursor": cursor is not None,
                     "event_types": event_types
@@ -95,7 +103,7 @@ class InboxService:
 
             events_data, has_more = self.repository.query_by_status_with_cursor(
                 user_id=user_id,
-                status='received',
+                status=status,
                 limit=limit,
                 cursor_timestamp=cursor_timestamp,
                 cursor_event_id=cursor_event_id,
@@ -119,7 +127,7 @@ class InboxService:
             # In production, this could be cached or approximated for performance
             total_count = self.repository.count_events_by_status(
                 user_id=user_id,
-                status='received',
+                status=status,
                 event_types=event_types
             )
 

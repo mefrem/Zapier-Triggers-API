@@ -476,3 +476,364 @@ class EventRepository:
                 }
             )
             raise
+
+    def delete_event(self, user_id: str, event_id: str) -> bool:
+        """
+        Permanently delete an event from DynamoDB.
+
+        Args:
+            user_id: User identifier (must match event owner)
+            event_id: Event UUID to delete
+
+        Returns:
+            True if event was deleted, False if event not found
+
+        Raises:
+            ClientError: If DynamoDB operation fails
+        """
+        try:
+            # First, get the event to retrieve timestamp#event_id
+            event = self.get_event_by_id(user_id, event_id)
+
+            if not event:
+                logger.info(
+                    "Event not found for deletion",
+                    extra={"user_id": user_id, "event_id": event_id}
+                )
+                return False
+
+            # Delete from DynamoDB
+            self.table.delete_item(
+                Key={
+                    'user_id': user_id,
+                    'timestamp#event_id': event['timestamp#event_id']
+                }
+            )
+
+            logger.info(
+                "Event deleted successfully",
+                extra={
+                    "event_id": event_id,
+                    "user_id": user_id,
+                    "operation": "event_deleted"
+                }
+            )
+
+            return True
+
+        except ClientError as e:
+            logger.error(
+                "Failed to delete event from DynamoDB",
+                extra={
+                    "event_id": event_id,
+                    "user_id": user_id,
+                    "error_code": e.response['Error']['Code'],
+                    "error_message": e.response['Error']['Message']
+                }
+            )
+            raise
+
+    def acknowledge_event(
+        self,
+        user_id: str,
+        event_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Acknowledge an event by updating its status to 'delivered'.
+
+        This operation is idempotent - acknowledging an already-delivered event
+        returns success.
+
+        Args:
+            user_id: User identifier (must match event owner)
+            event_id: Event UUID to acknowledge
+
+        Returns:
+            Updated event item with status='delivered', or None if event not found
+
+        Raises:
+            ClientError: If DynamoDB operation fails
+        """
+        try:
+            # First, get the event to retrieve timestamp#event_id and current status
+            event = self.get_event_by_id(user_id, event_id)
+
+            if not event:
+                logger.info(
+                    "Event not found for acknowledgment",
+                    extra={"user_id": user_id, "event_id": event_id}
+                )
+                return None
+
+            # Record current status for logging
+            old_status = event.get('status', 'unknown')
+
+            # Generate delivered_at timestamp
+            delivered_at = datetime.utcnow().isoformat() + 'Z'
+
+            # Update status to 'delivered' and add delivered_at timestamp
+            response = self.table.update_item(
+                Key={
+                    'user_id': user_id,
+                    'timestamp#event_id': event['timestamp#event_id']
+                },
+                UpdateExpression="SET #status = :status, delivered_at = :delivered_at, status#timestamp = :status_timestamp",
+                ExpressionAttributeNames={
+                    "#status": "status"
+                },
+                ExpressionAttributeValues={
+                    ":status": "delivered",
+                    ":delivered_at": delivered_at,
+                    ":status_timestamp": f"delivered#{event['timestamp']}"
+                },
+                ReturnValues="ALL_NEW"
+            )
+
+            updated_event = response.get('Attributes', {})
+
+            logger.info(
+                "Event acknowledged successfully",
+                extra={
+                    "event_id": event_id,
+                    "user_id": user_id,
+                    "operation": "event_acknowledged",
+                    "old_status": old_status,
+                    "new_status": "delivered"
+                }
+            )
+
+            return updated_event
+
+        except ClientError as e:
+            logger.error(
+                "Failed to acknowledge event",
+                extra={
+                    "event_id": event_id,
+                    "user_id": user_id,
+                    "error_code": e.response['Error']['Code'],
+                    "error_message": e.response['Error']['Message']
+                }
+            )
+            raise
+
+    def update_retry_attempts(
+        self,
+        user_id: str,
+        event_id: str,
+        retry_attempts: int,
+        last_error: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Update event retry attempts and last_retry_at timestamp.
+
+        Args:
+            user_id: User identifier
+            event_id: Event UUID
+            retry_attempts: New retry attempts count (must be <= 3)
+            last_error: Optional error message from last retry attempt
+
+        Returns:
+            Updated event item, or None if event not found
+
+        Raises:
+            ClientError: If DynamoDB operation fails
+            ValueError: If retry_attempts > 3
+        """
+        try:
+            if retry_attempts > 3:
+                raise ValueError("retry_attempts cannot exceed 3")
+
+            # Get the event to retrieve timestamp#event_id
+            event = self.get_event_by_id(user_id, event_id)
+
+            if not event:
+                logger.warning(
+                    "Event not found for retry update",
+                    extra={"user_id": user_id, "event_id": event_id}
+                )
+                return None
+
+            # Generate last_retry_at timestamp
+            last_retry_at = datetime.utcnow().isoformat() + 'Z'
+
+            # Build update expression
+            update_expression = "SET retry_attempts = :retry_attempts, last_retry_at = :last_retry_at"
+            expression_values = {
+                ":retry_attempts": retry_attempts,
+                ":last_retry_at": last_retry_at
+            }
+
+            if last_error:
+                update_expression += ", last_error = :last_error"
+                expression_values[":last_error"] = last_error
+
+            # Update retry metadata
+            response = self.table.update_item(
+                Key={
+                    'user_id': user_id,
+                    'timestamp#event_id': event['timestamp#event_id']
+                },
+                UpdateExpression=update_expression,
+                ExpressionAttributeValues=expression_values,
+                ReturnValues="ALL_NEW"
+            )
+
+            updated_event = response.get('Attributes', {})
+
+            logger.info(
+                "Event retry attempts updated",
+                extra={
+                    "event_id": event_id,
+                    "user_id": user_id,
+                    "retry_attempts": retry_attempts,
+                    "event": "retry_attempted"
+                }
+            )
+
+            return updated_event
+
+        except ClientError as e:
+            logger.error(
+                "Failed to update retry attempts",
+                extra={
+                    "event_id": event_id,
+                    "user_id": user_id,
+                    "error_code": e.response['Error']['Code']
+                }
+            )
+            raise
+
+    def mark_as_failed(
+        self,
+        user_id: str,
+        event_id: str,
+        failure_reason: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Mark an event as permanently failed after max retries.
+
+        Args:
+            user_id: User identifier
+            event_id: Event UUID
+            failure_reason: Optional reason for permanent failure
+
+        Returns:
+            Updated event item with status='failed', or None if event not found
+
+        Raises:
+            ClientError: If DynamoDB operation fails
+        """
+        try:
+            # Get the event to retrieve timestamp#event_id
+            event = self.get_event_by_id(user_id, event_id)
+
+            if not event:
+                logger.warning(
+                    "Event not found for failure marking",
+                    extra={"user_id": user_id, "event_id": event_id}
+                )
+                return None
+
+            # Record old status for logging
+            old_status = event.get('status', 'unknown')
+
+            # Generate failed_at timestamp
+            failed_at = datetime.utcnow().isoformat() + 'Z'
+
+            # Build update expression
+            update_expression = "SET #status = :status, failed_at = :failed_at, status#timestamp = :status_timestamp"
+            expression_values = {
+                ":status": "failed",
+                ":failed_at": failed_at,
+                ":status_timestamp": f"failed#{event['timestamp']}"
+            }
+            expression_names = {"#status": "status"}
+
+            if failure_reason:
+                update_expression += ", failure_reason = :failure_reason"
+                expression_values[":failure_reason"] = failure_reason
+
+            # Update status to 'failed'
+            response = self.table.update_item(
+                Key={
+                    'user_id': user_id,
+                    'timestamp#event_id': event['timestamp#event_id']
+                },
+                UpdateExpression=update_expression,
+                ExpressionAttributeNames=expression_names,
+                ExpressionAttributeValues=expression_values,
+                ReturnValues="ALL_NEW"
+            )
+
+            updated_event = response.get('Attributes', {})
+
+            logger.info(
+                "Event marked as failed",
+                extra={
+                    "event_id": event_id,
+                    "user_id": user_id,
+                    "operation": "event_failed",
+                    "old_status": old_status,
+                    "new_status": "failed",
+                    "failure_reason": failure_reason
+                }
+            )
+
+            return updated_event
+
+        except ClientError as e:
+            logger.error(
+                "Failed to mark event as failed",
+                extra={
+                    "event_id": event_id,
+                    "user_id": user_id,
+                    "error_code": e.response['Error']['Code']
+                }
+            )
+            raise
+
+    def get_event_status(
+        self,
+        user_id: str,
+        event_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get event status metadata without full payload.
+
+        Args:
+            user_id: User identifier
+            event_id: Event UUID
+
+        Returns:
+            Dict with status metadata (status, retry_attempts, timestamps), or None if not found
+        """
+        try:
+            # Get the full event
+            event = self.get_event_by_id(user_id, event_id)
+
+            if not event:
+                return None
+
+            # Return only status-related fields
+            status_info = {
+                'event_id': event.get('event_id'),
+                'status': event.get('status', 'received'),
+                'retry_attempts': event.get('retry_attempts', event.get('retry_count', 0)),
+                'last_retry_at': event.get('last_retry_at'),
+                'failed_at': event.get('failed_at'),
+                'delivered_at': event.get('delivered_at'),
+                'last_error': event.get('last_error')
+            }
+
+            return status_info
+
+        except ClientError as e:
+            logger.error(
+                "Failed to get event status",
+                extra={
+                    "event_id": event_id,
+                    "user_id": user_id,
+                    "error_code": e.response['Error']['Code']
+                }
+            )
+            raise
