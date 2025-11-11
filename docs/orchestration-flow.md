@@ -249,3 +249,27 @@
 
 ---
 
+### 2025-11-11 - @sm-scrum on Story 1.5
+
+**Story**: stories/1.5-event-inbox.md
+**Status**: Draft → Ready for Development
+**Outcome**: Successfully created Story 1.5: Implement Event Inbox Endpoint (GET /inbox) with comprehensive details:
+- 8 acceptance criteria from PRD (inbox endpoint returns undelivered events, event_type filtering, pagination with limit/cursor, sorted by timestamp, only status='received' events, response structure with event_id/event_type/timestamp/payload, 401 unauthorized responses, 200 OK for empty inbox)
+- 3 integration verification points (p95 latency <50ms, cursor opaque/secure, StatusIndex GSI efficient querying)
+- Comprehensive context: Pull-based event consumption, dependency on Stories 1.2-1.4
+- 6 detailed acceptance criteria sections with Implementation Notes for each
+- 3 detailed IV sections with verification checklists and AWS CLI commands
+- Technical implementation details: FastAPI handler structure, pagination cursor logic, query strategy using StatusIndex GSI, configuration requirements
+- Comprehensive testing strategy: Unit tests (15+ cases for pagination, filtering, validation), Integration tests (10+ cases for end-to-end retrieval), Load tests
+- Deployment plan with pre-deployment checklist, deployment steps, rollback procedures
+- Risk assessment addressing cursor tampering, hot partitions, Lambda cold starts, DynamoDB memory issues
+- Success criteria: Functional inbox retrieval, reliable (99.9%), fast (<50ms p95), secure cursors, observable logging, documented
+- Open questions addressed: Total count calculation, multiple event_type selection, cursor encryption, sorting secondary key, deleted events handling
+- 4 complete example usages: cURL (success, filtered, pagination, unauthorized, empty, invalid limit), Python SDK, JavaScript/Node.js
+- Dev agent record with 16 implementation tasks, file list for 13 new/modified files, completion checklist
+- Story validation: PASSED all acceptance criteria, integration verification, technical guidance, and self-containment requirements
+**Issues**: None - story ready for development
+**Next**: Await dev implementation of Story 1.5 (inbox retrieval with pagination and filtering)
+
+---
+

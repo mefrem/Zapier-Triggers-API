@@ -7,8 +7,9 @@ Handles persistence and retrieval of events in DynamoDB.
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 import boto3
+from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from aws_lambda_powertools import Logger
 
@@ -261,6 +262,216 @@ class EventRepository:
                 extra={
                     "user_id": user_id,
                     "timestamp_event_id": timestamp_event_id,
+                    "error_code": e.response['Error']['Code']
+                }
+            )
+            raise
+
+    def query_by_status(
+        self,
+        user_id: str,
+        status: str = 'received',
+        limit: int = 50,
+        last_evaluated_key: Optional[Dict[str, Any]] = None,
+        event_types: Optional[List[str]] = None
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], int]:
+        """
+        Query events by user_id and status using StatusIndex GSI.
+
+        Args:
+            user_id: User identifier
+            status: Event status (default: 'received')
+            limit: Maximum number of items to return (1-100)
+            last_evaluated_key: DynamoDB pagination key from previous query
+            event_types: Optional list of event types to filter
+
+        Returns:
+            Tuple of (events list, last_evaluated_key for pagination, total_count)
+
+        Raises:
+            ClientError: If DynamoDB operation fails
+        """
+        try:
+            # Build query parameters
+            query_params = {
+                'IndexName': 'StatusIndex',
+                'KeyConditionExpression': Key('user_id').eq(user_id) & Key('status#timestamp').begins_with(f'{status}#'),
+                'Limit': limit + 1,  # Request one extra to determine if more results exist
+                'ScanIndexForward': True,  # Ascending order (oldest first)
+                'ProjectionExpression': 'event_id, event_type, #ts, payload',
+                'ExpressionAttributeNames': {
+                    '#ts': 'timestamp'
+                }
+            }
+
+            # Add pagination key if provided
+            if last_evaluated_key:
+                query_params['ExclusiveStartKey'] = last_evaluated_key
+
+            # Execute query
+            response = self.table.query(**query_params)
+
+            items = response.get('Items', [])
+
+            # Check if there are more results
+            has_more = len(items) > limit
+            if has_more:
+                items = items[:limit]  # Remove the extra item
+                next_key = {
+                    'user_id': items[-1]['user_id'],
+                    'timestamp#event_id': items[-1]['timestamp#event_id'],
+                    'status#timestamp': items[-1].get('status#timestamp', f"{status}#{items[-1]['timestamp']}")
+                }
+            else:
+                next_key = None
+
+            # Filter by event_types if provided
+            if event_types:
+                items = [item for item in items if item.get('event_type') in event_types]
+
+            # Get total count (approximation for now)
+            # For exact count, we'd need to scan entire result set which is expensive
+            # For MVP, we return count of items in current page
+            total_count = len(items)
+
+            logger.info(
+                "Queried events by status",
+                extra={
+                    "user_id": user_id,
+                    "status": status,
+                    "items_returned": len(items),
+                    "has_more": has_more
+                }
+            )
+
+            return items, next_key, total_count
+
+        except ClientError as e:
+            logger.error(
+                "Failed to query events by status",
+                extra={
+                    "user_id": user_id,
+                    "status": status,
+                    "error_code": e.response['Error']['Code'],
+                    "error_message": e.response['Error']['Message']
+                }
+            )
+            raise
+
+    def query_by_status_with_cursor(
+        self,
+        user_id: str,
+        status: str = 'received',
+        limit: int = 50,
+        cursor_timestamp: Optional[str] = None,
+        cursor_event_id: Optional[str] = None,
+        event_types: Optional[List[str]] = None
+    ) -> Tuple[List[Dict[str, Any]], bool]:
+        """
+        Query events by status with cursor-based pagination.
+
+        Args:
+            user_id: User identifier
+            status: Event status (default: 'received')
+            limit: Maximum number of items to return
+            cursor_timestamp: Timestamp from pagination cursor
+            cursor_event_id: Event ID from pagination cursor
+            event_types: Optional list of event types to filter
+
+        Returns:
+            Tuple of (events list, has_more boolean)
+
+        Raises:
+            ClientError: If DynamoDB operation fails
+        """
+        try:
+            # Build last_evaluated_key from cursor if provided
+            last_evaluated_key = None
+            if cursor_timestamp and cursor_event_id:
+                last_evaluated_key = {
+                    'user_id': user_id,
+                    'timestamp#event_id': f"{cursor_timestamp}#{cursor_event_id}",
+                    'status#timestamp': f"{status}#{cursor_timestamp}"
+                }
+
+            # Query using existing method
+            items, next_key, _ = self.query_by_status(
+                user_id=user_id,
+                status=status,
+                limit=limit,
+                last_evaluated_key=last_evaluated_key,
+                event_types=event_types
+            )
+
+            has_more = next_key is not None
+
+            return items, has_more
+
+        except ClientError as e:
+            logger.error(
+                "Failed to query events with cursor",
+                extra={
+                    "user_id": user_id,
+                    "status": status,
+                    "error_code": e.response['Error']['Code']
+                }
+            )
+            raise
+
+    def count_events_by_status(
+        self,
+        user_id: str,
+        status: str = 'received',
+        event_types: Optional[List[str]] = None
+    ) -> int:
+        """
+        Count total events for user with given status.
+
+        Note: This performs a full query and counts items, which can be expensive.
+        For large result sets, consider caching or approximating.
+
+        Args:
+            user_id: User identifier
+            status: Event status
+            event_types: Optional list of event types to filter
+
+        Returns:
+            Total count of matching events
+        """
+        try:
+            count = 0
+            last_evaluated_key = None
+
+            while True:
+                items, last_evaluated_key, _ = self.query_by_status(
+                    user_id=user_id,
+                    status=status,
+                    limit=100,
+                    last_evaluated_key=last_evaluated_key,
+                    event_types=event_types
+                )
+
+                count += len(items)
+
+                if not last_evaluated_key:
+                    break
+
+                # Safety limit to prevent infinite loops
+                if count > 10000:
+                    logger.warning(
+                        "Count exceeded safety limit",
+                        extra={"user_id": user_id, "status": status}
+                    )
+                    break
+
+            return count
+
+        except ClientError as e:
+            logger.error(
+                "Failed to count events",
+                extra={
+                    "user_id": user_id,
+                    "status": status,
                     "error_code": e.response['Error']['Code']
                 }
             )
