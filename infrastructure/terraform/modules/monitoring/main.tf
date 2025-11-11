@@ -124,6 +124,67 @@ resource "aws_cloudwatch_dashboard" "main" {
           }
         }
       },
+      {
+        type = "metric"
+        properties = {
+          metrics = [
+            ["AWS/DynamoDB", "SuccessfulRequestLatency", { stat = "Average", label = "Average Latency" }],
+            ["...", { stat = "p95", label = "P95 Latency" }],
+            ["...", { stat = "p99", label = "P99 Latency" }]
+          ]
+          view   = "timeSeries"
+          region = data.aws_region.current.name
+          title  = "DynamoDB - Write Latency (PutItem)"
+          period = 300
+          yAxis = {
+            left = {
+              label = "Milliseconds"
+            }
+          }
+          dimensions = {
+            TableName = var.events_table_name
+            Operation = "PutItem"
+          }
+        }
+      },
+      {
+        type = "metric"
+        properties = {
+          metrics = [
+            ["AWS/DynamoDB", "SuccessfulRequestLatency", { stat = "Average", label = "Average Latency" }],
+            ["...", { stat = "p95", label = "P95 Latency" }]
+          ]
+          view   = "timeSeries"
+          region = data.aws_region.current.name
+          title  = "DynamoDB - Read Latency (Query/GetItem)"
+          period = 300
+          yAxis = {
+            left = {
+              label = "Milliseconds"
+            }
+          }
+          dimensions = {
+            TableName = var.events_table_name
+            Operation = "Query"
+          }
+        }
+      },
+      {
+        type = "metric"
+        properties = {
+          metrics = [
+            ["AWS/DynamoDB", "AccountMaxTableLevelReads", { stat = "Average", label = "Max Table Reads" }],
+            [".", "AccountMaxTableLevelWrites", { stat = "Average", label = "Max Table Writes" }]
+          ]
+          view   = "timeSeries"
+          region = data.aws_region.current.name
+          title  = "DynamoDB - Table Level Limits"
+          period = 300
+          dimensions = {
+            TableName = var.events_table_name
+          }
+        }
+      },
       # SQS Metrics
       {
         type = "metric"
@@ -248,6 +309,52 @@ resource "aws_cloudwatch_metric_alarm" "api_latency" {
 
   tags = {
     Name = "${local.resource_prefix}-api-latency"
+  }
+}
+
+# DynamoDB Write Latency Alarm
+resource "aws_cloudwatch_metric_alarm" "dynamodb_write_latency" {
+  alarm_name          = "${local.resource_prefix}-dynamodb-write-latency"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "SuccessfulRequestLatency"
+  namespace           = "AWS/DynamoDB"
+  period              = 300
+  extended_statistic  = "p99"
+  threshold           = 20 # 20 milliseconds
+  alarm_description   = "Alert when DynamoDB P99 write latency exceeds 20ms"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    TableName = var.events_table_name
+    Operation = "PutItem"
+  }
+
+  tags = {
+    Name = "${local.resource_prefix}-dynamodb-write-latency"
+  }
+}
+
+# DynamoDB Read Latency Alarm
+resource "aws_cloudwatch_metric_alarm" "dynamodb_read_latency" {
+  alarm_name          = "${local.resource_prefix}-dynamodb-read-latency"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "SuccessfulRequestLatency"
+  namespace           = "AWS/DynamoDB"
+  period              = 300
+  extended_statistic  = "p95"
+  threshold           = 50 # 50 milliseconds
+  alarm_description   = "Alert when DynamoDB P95 read latency exceeds 50ms"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    TableName = var.events_table_name
+    Operation = "Query"
+  }
+
+  tags = {
+    Name = "${local.resource_prefix}-dynamodb-read-latency"
   }
 }
 

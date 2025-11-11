@@ -62,7 +62,7 @@ resource "aws_dynamodb_table" "events" {
 
   # DynamoDB Streams for event notifications
   stream_enabled   = true
-  stream_view_type = "NEW_AND_OLD_IMAGES"
+  stream_view_type = "NEW_IMAGE"
 
   tags = {
     Name = "${local.resource_prefix}-events"
