@@ -1,0 +1,302 @@
+openapi: 3.0.0
+info:
+  title: Zapier Triggers API
+  version: 1.0.0
+  description: |
+    Event delivery API for Zapier workflows.
+    
+    This API enables developers to send events to Zapier, which can then trigger automated workflows.
+    Events are stored temporarily and made available via polling (GET /inbox).
+    
+  contact:
+    name: Zapier API Support
+    email: api-support@zapier.com
+    url: https://zapier.com/support
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: https://api.zapier.com/v1
+    description: Production
+  - url: https://staging-api.zapier.com/v1
+    description: Staging
+  - url: http://localhost:8000/v1
+    description: Local Development
+
+tags:
+  - name: Events
+    description: Event ingestion and retrieval
+  - name: Authentication
+    description: API key management
+  - name: Health
+    description: System health checks
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for authentication
+
+  schemas:
+    Event:
+      type: object
+      required:
+        - event_type
+        - payload
+      properties:
+        event_type:
+          type: string
+          pattern: '^[a-z0-9_]+\.[a-z0-9_]+$'
+          description: Event type in format 'domain.action' (e.g., 'user.created', 'order.paid')
+          example: user.created
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp (defaults to current time if not provided)
+          example: '2025-11-12T10:30:00Z'
+        payload:
+          type: object
+          description: Event data (max 1MB)
+          example:
+            user_id: '12345'
+            email: 'user@example.com'
+            name: 'John Doe'
+
+    EventResponse:
+      type: object
+      properties:
+        event_id:
+          type: string
+          example: 'evt_550e8400e29b41d4'
+        event_type:
+          type: string
+          example: 'user.created'
+        timestamp:
+          type: string
+          format: date-time
+          example: '2025-11-12T10:30:00.123456Z'
+        payload:
+          type: object
+        status:
+          type: string
+          enum: [received, delivered, failed]
+          example: 'received'
+        created_at:
+          type: string
+          format: date-time
+          example: '2025-11-12T10:30:00.123456Z'
+
+    InboxResponse:
+      type: object
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventResponse'
+        cursor:
+          type: string
+          nullable: true
+          example: 'eyJsYXN0X2tleV9pZCI6ImV2dF94eXoiLCAidGltZXN0YW1wIjoiMjAyNS0xMS0xMlQxMDowMDowMFoifQ=='
+        has_more:
+          type: boolean
+          example: true
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: 'INVALID_PAYLOAD'
+            message:
+              type: string
+              example: 'Payload size exceeds 1MB limit'
+            timestamp:
+              type: string
+              format: date-time
+              example: '2025-11-12T10:30:00Z'
+            request_id:
+              type: string
+              example: 'req-123456'
+
+paths:
+  /events:
+    post:
+      summary: Ingest an event
+      description: |
+        Create a new event for a Zapier workflow.
+        Events are stored and made available via GET /inbox for polling.
+      tags:
+        - Events
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Event'
+      responses:
+        '201':
+          description: Event successfully ingested
+          headers:
+            X-RateLimit-Limit:
+              schema:
+                type: integer
+              description: Rate limit (requests per minute)
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+              description: Remaining requests in current window
+            X-RateLimit-Reset:
+              schema:
+                type: integer
+              description: Unix timestamp when rate limit resets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventResponse'
+        '400':
+          description: Bad Request - Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - Invalid or missing API key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Too Many Requests - Rate limit exceeded
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds to wait before retrying
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /inbox:
+    get:
+      summary: Get undelivered events
+      description: Retrieve events that have not yet been acknowledged.
+      tags:
+        - Events
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+          description: Maximum number of events to return
+        - name: cursor
+          in: query
+          schema:
+            type: string
+          description: Pagination cursor from previous response
+      responses:
+        '200':
+          description: Events successfully retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InboxResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /events/{event_id}:
+    delete:
+      summary: Delete an event
+      description: Delete an event from the inbox.
+      tags:
+        - Events
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: event_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Event ID
+      responses:
+        '204':
+          description: Event successfully deleted
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /events/{event_id}/ack:
+    post:
+      summary: Acknowledge event delivery
+      description: Mark an event as delivered/acknowledged.
+      tags:
+        - Events
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: event_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Event acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventResponse'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /health:
+    get:
+      summary: Health check
+      description: Check API health status
+      tags:
+        - Health
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: 'healthy'
+                  timestamp:
+                    type: string
+                    format: date-time
+                  version:
+                    type: string
+                    example: '1.0.0'
+
+security:
+  - ApiKeyAuth: []

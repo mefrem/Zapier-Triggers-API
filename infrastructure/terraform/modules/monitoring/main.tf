@@ -1,32 +1,92 @@
-# Monitoring Module - CloudWatch Dashboards and Alarms
+# CloudWatch Dashboard, Alarms, and X-Ray Configuration for Zapier Triggers API
 
-locals {
-  resource_prefix = "${var.project_name}-${var.environment}"
+terraform {
+  required_version = ">= 1.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+variable "environment" {
+  description = "Environment name (dev, staging, prod)"
+  type        = string
+}
+
+variable "api_name" {
+  description = "API name for CloudWatch metrics"
+  type        = string
+  default     = "zapier-triggers-api"
+}
+
+variable "lambda_function_name" {
+  description = "Lambda function name for monitoring"
+  type        = string
+}
+
+variable "dynamodb_table_name" {
+  description = "DynamoDB table name for monitoring"
+  type        = string
+}
+
+variable "sns_alert_email" {
+  description = "Email address for CloudWatch alarms"
+  type        = string
+}
+
+# SNS Topic for Alerts
+resource "aws_sns_topic" "ops_alerts" {
+  name = "${var.api_name}-${var.environment}-ops-alerts"
+
+  tags = {
+    Name        = "${var.api_name}-ops-alerts"
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
+}
+
+resource "aws_sns_topic_subscription" "ops_alerts_email" {
+  topic_arn = aws_sns_topic.ops_alerts.arn
+  protocol  = "email"
+  endpoint  = var.sns_alert_email
+}
+
+# CloudWatch Log Group for Lambda
+resource "aws_cloudwatch_log_group" "lambda_logs" {
+  name              = "/aws/lambda/${var.lambda_function_name}"
+  retention_in_days = 90
+
+  tags = {
+    Name        = "${var.api_name}-lambda-logs"
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
 }
 
 # CloudWatch Dashboard
 resource "aws_cloudwatch_dashboard" "main" {
-  dashboard_name = "${local.resource_prefix}-dashboard"
+  dashboard_name = "${var.api_name}-${var.environment}-main-dashboard"
 
   dashboard_body = jsonencode({
     widgets = [
-      # API Gateway Metrics
       {
         type = "metric"
         properties = {
           metrics = [
-            ["AWS/ApiGateway", "Count", { stat = "Sum", label = "Total Requests" }],
-            [".", "4XXError", { stat = "Sum", label = "4XX Errors" }],
-            [".", "5XXError", { stat = "Sum", label = "5XX Errors" }]
+            ["AWS/Lambda", "Invocations", { stat = "Sum", label = "Total Requests" }],
+            [".", "Errors", { stat = "Sum", label = "Errors" }],
+            [".", "Throttles", { stat = "Sum", label = "Throttles" }]
           ]
-          view    = "timeSeries"
-          stacked = false
-          region  = data.aws_region.current.name
-          title   = "API Gateway - Request Count"
-          period  = 300
-          dimensions = {
-            ApiName = "${local.resource_prefix}-api"
-            Stage   = var.api_gateway_stage_name
+          period = 60
+          stat   = "Average"
+          region = "us-east-1"
+          title  = "Lambda Invocations & Errors"
+          yAxis = {
+            left = {
+              label = "Count"
+            }
           }
         }
       },
@@ -34,329 +94,164 @@ resource "aws_cloudwatch_dashboard" "main" {
         type = "metric"
         properties = {
           metrics = [
-            ["AWS/ApiGateway", "Latency", { stat = "Average", label = "Average Latency" }],
-            ["...", { stat = "p95", label = "P95 Latency" }],
-            ["...", { stat = "p99", label = "P99 Latency" }]
+            ["AWS/Lambda", "Duration", { stat = "p50", label = "p50" }],
+            ["...", { stat = "p95", label = "p95" }],
+            ["...", { stat = "p99", label = "p99" }]
           ]
-          view   = "timeSeries"
-          region = data.aws_region.current.name
-          title  = "API Gateway - Latency"
-          period = 300
+          period = 60
+          stat   = "Average"
+          region = "us-east-1"
+          title  = "Lambda Latency Percentiles"
           yAxis = {
             left = {
               label = "Milliseconds"
             }
           }
-          dimensions = {
-            ApiName = "${local.resource_prefix}-api"
-            Stage   = var.api_gateway_stage_name
-          }
-        }
-      },
-      # Lambda Metrics
-      {
-        type = "metric"
-        properties = {
-          metrics = [
-            ["AWS/Lambda", "Invocations", { stat = "Sum" }],
-            [".", "Errors", { stat = "Sum" }],
-            [".", "Throttles", { stat = "Sum" }]
-          ]
-          view   = "timeSeries"
-          region = data.aws_region.current.name
-          title  = "Lambda - Health Check Function"
-          period = 300
-          dimensions = {
-            FunctionName = var.health_check_function_name
-          }
         }
       },
       {
         type = "metric"
         properties = {
           metrics = [
-            ["AWS/Lambda", "Duration", { stat = "Average", label = "Average Duration" }],
-            ["...", { stat = "Maximum", label = "Max Duration" }]
+            ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", { stat = "Sum" }],
+            [".", "ConsumedReadCapacityUnits", { stat = "Sum" }]
           ]
-          view   = "timeSeries"
-          region = data.aws_region.current.name
-          title  = "Lambda - Duration"
-          period = 300
-          yAxis = {
-            left = {
-              label = "Milliseconds"
-            }
-          }
-          dimensions = {
-            FunctionName = var.health_check_function_name
-          }
-        }
-      },
-      # DynamoDB Metrics
-      {
-        type = "metric"
-        properties = {
-          metrics = [
-            ["AWS/DynamoDB", "ConsumedReadCapacityUnits", { stat = "Sum", label = "Read Capacity" }],
-            [".", "ConsumedWriteCapacityUnits", { stat = "Sum", label = "Write Capacity" }]
-          ]
-          view   = "timeSeries"
-          region = data.aws_region.current.name
-          title  = "DynamoDB - Events Table Capacity"
-          period = 300
-          dimensions = {
-            TableName = var.events_table_name
-          }
+          period = 60
+          stat   = "Sum"
+          region = "us-east-1"
+          title  = "DynamoDB Capacity Usage"
         }
       },
       {
         type = "metric"
         properties = {
           metrics = [
-            ["AWS/DynamoDB", "UserErrors", { stat = "Sum", label = "Throttled Requests" }]
+            ["ZapierTriggersAPI", "EventsIngested", { stat = "Sum" }],
+            [".", "EventsDelivered", { stat = "Sum" }],
+            [".", "EventsFailed", { stat = "Sum" }]
           ]
-          view   = "timeSeries"
-          region = data.aws_region.current.name
-          title  = "DynamoDB - Throttling"
-          period = 300
-          dimensions = {
-            TableName = var.events_table_name
-          }
-        }
-      },
-      {
-        type = "metric"
-        properties = {
-          metrics = [
-            ["AWS/DynamoDB", "SuccessfulRequestLatency", { stat = "Average", label = "Average Latency" }],
-            ["...", { stat = "p95", label = "P95 Latency" }],
-            ["...", { stat = "p99", label = "P99 Latency" }]
-          ]
-          view   = "timeSeries"
-          region = data.aws_region.current.name
-          title  = "DynamoDB - Write Latency (PutItem)"
-          period = 300
-          yAxis = {
-            left = {
-              label = "Milliseconds"
-            }
-          }
-          dimensions = {
-            TableName = var.events_table_name
-            Operation = "PutItem"
-          }
-        }
-      },
-      {
-        type = "metric"
-        properties = {
-          metrics = [
-            ["AWS/DynamoDB", "SuccessfulRequestLatency", { stat = "Average", label = "Average Latency" }],
-            ["...", { stat = "p95", label = "P95 Latency" }]
-          ]
-          view   = "timeSeries"
-          region = data.aws_region.current.name
-          title  = "DynamoDB - Read Latency (Query/GetItem)"
-          period = 300
-          yAxis = {
-            left = {
-              label = "Milliseconds"
-            }
-          }
-          dimensions = {
-            TableName = var.events_table_name
-            Operation = "Query"
-          }
-        }
-      },
-      {
-        type = "metric"
-        properties = {
-          metrics = [
-            ["AWS/DynamoDB", "AccountMaxTableLevelReads", { stat = "Average", label = "Max Table Reads" }],
-            [".", "AccountMaxTableLevelWrites", { stat = "Average", label = "Max Table Writes" }]
-          ]
-          view   = "timeSeries"
-          region = data.aws_region.current.name
-          title  = "DynamoDB - Table Level Limits"
-          period = 300
-          dimensions = {
-            TableName = var.events_table_name
-          }
-        }
-      },
-      # SQS Metrics
-      {
-        type = "metric"
-        properties = {
-          metrics = [
-            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", { stat = "Average", label = "Messages in Queue" }],
-            [".", "NumberOfMessagesSent", { stat = "Sum", label = "Messages Sent" }],
-            [".", "NumberOfMessagesReceived", { stat = "Sum", label = "Messages Received" }]
-          ]
-          view   = "timeSeries"
-          region = data.aws_region.current.name
-          title  = "SQS - Event Queue"
-          period = 300
-          dimensions = {
-            QueueName = var.event_queue_name
-          }
-        }
-      },
-      {
-        type = "metric"
-        properties = {
-          metrics = [
-            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", { stat = "Average" }]
-          ]
-          view   = "timeSeries"
-          region = data.aws_region.current.name
-          title  = "SQS - Dead Letter Queue"
-          period = 300
-          dimensions = {
-            QueueName = var.event_dlq_name
-          }
+          period = 60
+          stat   = "Sum"
+          region = "us-east-1"
+          title  = "Custom Business Metrics"
         }
       }
     ]
   })
 }
 
-# API Gateway Error Rate Alarm
-resource "aws_cloudwatch_metric_alarm" "api_error_rate" {
-  alarm_name          = "${local.resource_prefix}-api-error-rate"
+# High Error Rate Alarm (>5%)
+resource "aws_cloudwatch_metric_alarm" "high_error_rate" {
+  alarm_name          = "${var.api_name}-${var.environment}-high-error-rate"
   comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 2
-  metric_name         = "5XXError"
-  namespace           = "AWS/ApiGateway"
-  period              = 300
-  statistic           = "Sum"
-  threshold           = 10
-  alarm_description   = "Alert when API Gateway 5XX error count exceeds threshold"
+  evaluation_periods  = 1
+  threshold           = 5.0
+  alarm_description   = "Error rate exceeded 5% over 5-minute period"
   treat_missing_data  = "notBreaching"
 
-  dimensions = {
-    ApiName = "${local.resource_prefix}-api"
-    Stage   = var.api_gateway_stage_name
+  metric_query {
+    id          = "error_rate"
+    expression  = "(errors / invocations) * 100"
+    label       = "Error Rate (%)"
+    return_data = true
   }
 
+  metric_query {
+    id = "errors"
+    metric {
+      metric_name = "Errors"
+      namespace   = "AWS/Lambda"
+      period      = 300
+      stat        = "Sum"
+      dimensions = {
+        FunctionName = var.lambda_function_name
+      }
+    }
+  }
+
+  metric_query {
+    id = "invocations"
+    metric {
+      metric_name = "Invocations"
+      namespace   = "AWS/Lambda"
+      period      = 300
+      stat        = "Sum"
+      dimensions = {
+        FunctionName = var.lambda_function_name
+      }
+    }
+  }
+
+  alarm_actions = [aws_sns_topic.ops_alerts.arn]
+  ok_actions    = [aws_sns_topic.ops_alerts.arn]
+
   tags = {
-    Name = "${local.resource_prefix}-api-error-rate"
+    Name        = "${var.api_name}-high-error-rate-alarm"
+    Environment = var.environment
+    ManagedBy   = "terraform"
   }
 }
 
-# Lambda Error Alarm
-resource "aws_cloudwatch_metric_alarm" "lambda_errors" {
-  alarm_name          = "${local.resource_prefix}-lambda-errors"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 2
-  metric_name         = "Errors"
-  namespace           = "AWS/Lambda"
-  period              = 300
-  statistic           = "Sum"
-  threshold           = 5
-  alarm_description   = "Alert when Lambda function errors exceed threshold"
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {
-    FunctionName = var.health_check_function_name
-  }
-
-  tags = {
-    Name = "${local.resource_prefix}-lambda-errors"
-  }
-}
-
-# Lambda Duration Alarm (Cold Starts)
-resource "aws_cloudwatch_metric_alarm" "lambda_duration" {
-  alarm_name          = "${local.resource_prefix}-lambda-duration"
+# High Latency Alarm (p95 > 100ms)
+resource "aws_cloudwatch_metric_alarm" "high_latency_p95" {
+  alarm_name          = "${var.api_name}-${var.environment}-high-latency-p95"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   metric_name         = "Duration"
   namespace           = "AWS/Lambda"
   period              = 300
-  statistic           = "Average"
-  threshold           = 5000 # 5 seconds
-  alarm_description   = "Alert when Lambda function duration exceeds 5 seconds"
+  statistic           = "p95"
+  threshold           = 100
+  alarm_description   = "p95 latency exceeded 100ms for 10 minutes"
   treat_missing_data  = "notBreaching"
 
   dimensions = {
-    FunctionName = var.health_check_function_name
+    FunctionName = var.lambda_function_name
   }
 
+  alarm_actions = [aws_sns_topic.ops_alerts.arn]
+  ok_actions    = [aws_sns_topic.ops_alerts.arn]
+
   tags = {
-    Name = "${local.resource_prefix}-lambda-duration"
+    Name        = "${var.api_name}-high-latency-alarm"
+    Environment = var.environment
+    ManagedBy   = "terraform"
   }
 }
 
-# API Gateway Latency Alarm
-resource "aws_cloudwatch_metric_alarm" "api_latency" {
-  alarm_name          = "${local.resource_prefix}-api-latency"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 2
-  metric_name         = "Latency"
-  namespace           = "AWS/ApiGateway"
-  period              = 300
-  extended_statistic  = "p95"
-  threshold           = 1000 # 1 second
-  alarm_description   = "Alert when API Gateway P95 latency exceeds 1 second"
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {
-    ApiName = "${local.resource_prefix}-api"
-    Stage   = var.api_gateway_stage_name
-  }
+# X-Ray Sampling Rule
+resource "aws_xray_sampling_rule" "triggers_api" {
+  rule_name      = "${var.api_name}-${var.environment}-sampling"
+  priority       = 1000
+  version        = 1
+  reservoir_size = 1
+  fixed_rate     = var.environment == "prod" ? 0.01 : 1.0
+  url_path       = "*"
+  host           = "*"
+  http_method    = "*"
+  service_type   = "*"
+  service_name   = var.api_name
+  resource_arn   = "*"
 
   tags = {
-    Name = "${local.resource_prefix}-api-latency"
+    Name        = "${var.api_name}-xray-sampling"
+    Environment = var.environment
+    ManagedBy   = "terraform"
   }
 }
 
-# DynamoDB Write Latency Alarm
-resource "aws_cloudwatch_metric_alarm" "dynamodb_write_latency" {
-  alarm_name          = "${local.resource_prefix}-dynamodb-write-latency"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 3
-  metric_name         = "SuccessfulRequestLatency"
-  namespace           = "AWS/DynamoDB"
-  period              = 300
-  extended_statistic  = "p99"
-  threshold           = 20 # 20 milliseconds
-  alarm_description   = "Alert when DynamoDB P99 write latency exceeds 20ms"
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {
-    TableName = var.events_table_name
-    Operation = "PutItem"
-  }
-
-  tags = {
-    Name = "${local.resource_prefix}-dynamodb-write-latency"
-  }
+# Outputs
+output "dashboard_url" {
+  description = "URL to CloudWatch dashboard"
+  value       = "https://console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards:name=${aws_cloudwatch_dashboard.main.dashboard_name}"
 }
 
-# DynamoDB Read Latency Alarm
-resource "aws_cloudwatch_metric_alarm" "dynamodb_read_latency" {
-  alarm_name          = "${local.resource_prefix}-dynamodb-read-latency"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 3
-  metric_name         = "SuccessfulRequestLatency"
-  namespace           = "AWS/DynamoDB"
-  period              = 300
-  extended_statistic  = "p95"
-  threshold           = 50 # 50 milliseconds
-  alarm_description   = "Alert when DynamoDB P95 read latency exceeds 50ms"
-  treat_missing_data  = "notBreaching"
-
-  dimensions = {
-    TableName = var.events_table_name
-    Operation = "Query"
-  }
-
-  tags = {
-    Name = "${local.resource_prefix}-dynamodb-read-latency"
-  }
+output "sns_topic_arn" {
+  description = "SNS topic ARN for alerts"
+  value       = aws_sns_topic.ops_alerts.arn
 }
 
-# Data source for current AWS region
-data "aws_region" "current" {}
+output "log_group_name" {
+  description = "CloudWatch log group name"
+  value       = aws_cloudwatch_log_group.lambda_logs.name
+}
